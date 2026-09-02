@@ -170,6 +170,7 @@ The log includes certificate details, Azure authentication status, upload result
 | `Could not confirm active SNI binding` | Warning only. The binding is usually still propagating; confirm in the Azure Portal if it persists. |
 | `DC1_POST_SCRIPT_DATA is not set` | The script is not being invoked by the TLM Agent, or the AWR profile is misconfigured. |
 | Script ignores the AWR parameters | The hardcoded override block below the `$ARGUMENT_n` assignments is uncommented and is overwriting them. Compare the log's `Azure Configuration:` values against your AWR request; comment the override block out. |
+| `ParserError: Unexpected token '}'` / `The Try statement is missing its Catch or Finally block` | The script file contains non-ASCII characters (em-dashes, smart quotes — often introduced by editing in Word/Outlook or copy-pasting) and was saved as UTF-8 without a BOM. PowerShell 5.1 reads BOM-less files as ANSI, turning em-dashes into smart quotes that terminate strings early and cascade into brace errors far from the real damage. Keep the script pure ASCII, and validate before uploading: `[System.Management.Automation.Language.Parser]::ParseFile(...)`. |
 
 ## Security Considerations
 

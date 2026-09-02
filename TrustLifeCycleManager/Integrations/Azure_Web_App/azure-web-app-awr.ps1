@@ -1,11 +1,11 @@
-﻿<#
+<#
 .SYNOPSIS
     DigiCert TLM Agent Certificate Processing Script with Azure Web App Upload
 .DESCRIPTION
     PowerShell script for processing certificate data from DigiCert TLM Agent and automatically uploading to Azure Web Apps
 .NOTES
     Legal Notice (version January 1, 2026)
-    Copyright © 2026 DigiCert. All rights reserved.
+    Copyright (c) 2026 DigiCert. All rights reserved.
     DigiCert and its logo are registered trademarks of DigiCert, Inc.
     Other names may be trademarks of their respective owners.
     
@@ -34,7 +34,7 @@
     US Government Restricted Rights: The software is provided with "Restricted Rights," Use, duplication, or
     disclosure by the U.S. Government is subject to restrictions as set forth in subparagraph (c)(1)(ii) of the
     Rights in Technical Data and Computer Software clause at DFARS 252.227-7013,
-    subparagraphs (c)(1) and (2) of the Commercial Computer Software—Restricted Rights at 48 CFR 52.227-19,
+    subparagraphs (c)(1) and (2) of the Commercial Computer Software-Restricted Rights at 48 CFR 52.227-19,
     as applicable, and the Technical Data - Commercial Items clause at DFARS 252.227-7015 (Nov 1995) and any successor regulations.
     The contractor/manufacturer is DIGICERT, INC.
 #>
@@ -92,7 +92,7 @@ try {
     exit 1
 }
 
-# Log the JSON for debugging — with password fields redacted so secrets never reach the log
+# Log the JSON for debugging - with password fields redacted so secrets never reach the log
 $REDACTED_JSON = $JSON_STRING -replace '("(?:password|pfx_password|keystore_password|passphrase|secret|pin)"\s*:\s*")[^"]*(")', '$1***REDACTED***$2'
 Write-LogMessage "=========================================="
 Write-LogMessage "JSON content (secrets redacted):"
@@ -121,7 +121,7 @@ $ARGUMENT_5 = ""
 # Extract arguments if they exist
 if ($JSON_OBJECT.args) {
     $ARGS_ARRAY = $JSON_OBJECT.args
-    # Do not log raw argument values here — arguments 4/5 may carry the PFX password
+    # Do not log raw argument values here - arguments 4/5 may carry the PFX password
     Write-LogMessage "Args array received ($($ARGS_ARRAY.Count) entries)"
     
     if ($ARGS_ARRAY.Count -ge 1) { 
@@ -139,7 +139,7 @@ if ($JSON_OBJECT.args) {
         Write-LogMessage "ARGUMENT_3 extracted: '$ARGUMENT_3'"
         Write-LogMessage "ARGUMENT_3 length: $($ARGUMENT_3.Length)"
     }
-    # Arguments 4 and 5 may carry the PFX password — log length only, never the value
+    # Arguments 4 and 5 may carry the PFX password - log length only, never the value
     if ($ARGS_ARRAY.Count -ge 4) {
         $ARGUMENT_4 = ($ARGS_ARRAY[3] -replace '\s', '').Trim()
         Write-LogMessage "ARGUMENT_4 extracted (value not logged)"
@@ -625,9 +625,9 @@ try {
     exit 1
 }
 
-# Abort if we don't have a thumbprint — nothing further can succeed without it
+# Abort if we don't have a thumbprint - nothing further can succeed without it
 if ([string]::IsNullOrEmpty($thumbprint)) {
-    Write-LogMessage "ERROR: No thumbprint available after upload — cannot proceed with binding"
+    Write-LogMessage "ERROR: No thumbprint available after upload - cannot proceed with binding"
     exit 1
 }
 
@@ -726,7 +726,7 @@ if (-not [string]::IsNullOrEmpty($AZURE_CUSTOM_DOMAIN)) {
         if (-not [string]::IsNullOrWhiteSpace($httpsStderr)) {
             Write-LogMessage "  Azure CLI Error: $httpsStderr"
         }
-        Write-LogMessage "  Cannot proceed — ssl bind will be blocked by Azure Policy while httpsOnly=false"
+        Write-LogMessage "  Cannot proceed - ssl bind will be blocked by Azure Policy while httpsOnly=false"
         exit 1
     }
 
@@ -809,7 +809,7 @@ try {
             Write-LogMessage "  Thumbprint: $thumbprint"
         } else {
             Write-LogMessage "WARNING: Newly uploaded certificate not found in SSL list"
-            Write-LogMessage "  This may be a timing issue — certificate might still be processing"
+            Write-LogMessage "  This may be a timing issue - certificate might still be processing"
         }
 
         # List all certificates for reference
@@ -849,7 +849,7 @@ if (-not [string]::IsNullOrEmpty($AZURE_CUSTOM_DOMAIN)) {
             }
         } else {
             Write-LogMessage "WARNING: Could not confirm active SNI binding for $AZURE_CUSTOM_DOMAIN -> $thumbprint"
-            Write-LogMessage "  The certificate may still be propagating — check the Azure Portal"
+            Write-LogMessage "  The certificate may still be propagating - check the Azure Portal"
         }
     } catch {
         Write-LogMessage "WARNING: Could not verify active SNI binding: $_"
