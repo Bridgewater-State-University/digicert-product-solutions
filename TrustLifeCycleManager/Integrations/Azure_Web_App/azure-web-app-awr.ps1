@@ -92,10 +92,11 @@ try {
     exit 1
 }
 
-# Log the raw JSON for debugging
+# Log the JSON for debugging — with password fields redacted so secrets never reach the log
+$REDACTED_JSON = $JSON_STRING -replace '("(?:password|pfx_password|keystore_password|passphrase|secret|pin)"\s*:\s*")[^"]*(")', '$1***REDACTED***$2'
 Write-LogMessage "=========================================="
-Write-LogMessage "Raw JSON content:"
-Write-LogMessage $JSON_STRING
+Write-LogMessage "JSON content (secrets redacted):"
+Write-LogMessage $REDACTED_JSON
 Write-LogMessage "=========================================="
 
 # Parse JSON
@@ -120,7 +121,8 @@ $ARGUMENT_5 = ""
 # Extract arguments if they exist
 if ($JSON_OBJECT.args) {
     $ARGS_ARRAY = $JSON_OBJECT.args
-    Write-LogMessage "Raw args array: $($ARGS_ARRAY -join ',')"
+    # Do not log raw argument values here — arguments 4/5 may carry the PFX password
+    Write-LogMessage "Args array received ($($ARGS_ARRAY.Count) entries)"
     
     if ($ARGS_ARRAY.Count -ge 1) { 
         $ARGUMENT_1 = ($ARGS_ARRAY[0] -replace '\s', '').Trim()
@@ -137,14 +139,15 @@ if ($JSON_OBJECT.args) {
         Write-LogMessage "ARGUMENT_3 extracted: '$ARGUMENT_3'"
         Write-LogMessage "ARGUMENT_3 length: $($ARGUMENT_3.Length)"
     }
-    if ($ARGS_ARRAY.Count -ge 4) { 
+    # Arguments 4 and 5 may carry the PFX password — log length only, never the value
+    if ($ARGS_ARRAY.Count -ge 4) {
         $ARGUMENT_4 = ($ARGS_ARRAY[3] -replace '\s', '').Trim()
-        Write-LogMessage "ARGUMENT_4 extracted: '$ARGUMENT_4'"
+        Write-LogMessage "ARGUMENT_4 extracted (value not logged)"
         Write-LogMessage "ARGUMENT_4 length: $($ARGUMENT_4.Length)"
     }
-    if ($ARGS_ARRAY.Count -ge 5) { 
+    if ($ARGS_ARRAY.Count -ge 5) {
         $ARGUMENT_5 = ($ARGS_ARRAY[4] -replace '\s', '').Trim()
-        Write-LogMessage "ARGUMENT_5 extracted: '$ARGUMENT_5'"
+        Write-LogMessage "ARGUMENT_5 extracted (value not logged)"
         Write-LogMessage "ARGUMENT_5 length: $($ARGUMENT_5.Length)"
     }
 }
@@ -179,13 +182,6 @@ if ([string]::IsNullOrEmpty($PFX_PASSWORD)) {
 } else {
     Write-LogMessage "PFX password extracted from JSON"
     Write-LogMessage "PFX password length: $($PFX_PASSWORD.Length) characters"
-    # Log first 3 chars of password for verification (masked for security)
-    if ($PFX_PASSWORD.Length -ge 3) {
-        $PFX_PASSWORD_MASKED = $PFX_PASSWORD.Substring(0, 3) + "***"
-        Write-LogMessage "PFX password (masked): $PFX_PASSWORD_MASKED"
-    } else {
-        Write-LogMessage "PFX password (masked): ***"
-    }
 }
 
 # Construct file path
@@ -203,8 +199,8 @@ Write-LogMessage "Arguments extracted:"
 Write-LogMessage "  Argument 1: $ARGUMENT_1"
 Write-LogMessage "  Argument 2: $ARGUMENT_2"
 Write-LogMessage "  Argument 3: $ARGUMENT_3"
-Write-LogMessage "  Argument 4: $ARGUMENT_4"
-Write-LogMessage "  Argument 5: $ARGUMENT_5"
+Write-LogMessage "  Argument 4: $(if ([string]::IsNullOrEmpty($ARGUMENT_4)) { '(empty)' } else { '(set, value not logged)' })"
+Write-LogMessage "  Argument 5: $(if ([string]::IsNullOrEmpty($ARGUMENT_5)) { '(empty)' } else { '(set, value not logged)' })"
 Write-LogMessage ""
 Write-LogMessage "Certificate information:"
 Write-LogMessage "  Certificate folder: $CERT_FOLDER"
