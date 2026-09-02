@@ -175,7 +175,7 @@ The log includes certificate details, Azure authentication status, upload result
 
 - The script clears the Azure client secret and PFX password from memory after use and logs out of Azure CLI on completion.
 - For production environments, use the encrypted file approach for the client secret rather than hardcoding it in the script.
-- The PFX password is logged only as a masked value (first 3 characters) for debugging purposes. Consider removing this in production.
+- No secret values are written to the log: password fields are redacted from the decoded JSON payload before it is logged, the PFX password is reported by length only, and AWR arguments 4/5 (which may carry the password) are logged as set/empty plus length, never by value.
 - The TLM Agent runs as `LocalSystem`, so the Azure CLI path is resolved explicitly rather than relying on the system PATH.
 
 ## License
