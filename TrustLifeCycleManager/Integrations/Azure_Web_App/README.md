@@ -77,12 +77,18 @@ The script therefore sets `httpsOnly=true` before binding. This satisfies the po
 - **Azure Service Principal** with the following permissions:
   - `Microsoft.Web/certificates/Write` — to upload certificates
   - `Microsoft.Web/certificates/Read` — to verify the deployed certificate and its binding
+  - `Microsoft.Web/serverfarms/Write` — required on the **App Service Plan** hosting the Web App: the uploaded certificate is linked to the plan (`serverFarmId`), and ARM's linked-access check rejects the upload with `LinkedAuthorizationFailed` without it
   - `Microsoft.Web/sites/Read` — to verify the Web App
   - `Microsoft.Web/sites/Write` — to enable HTTPS-only before binding (see [HTTPS-only and Azure Policy](#https-only-and-azure-policy))
   - `Microsoft.Web/sites/hostNameBindings/Write` — to add custom domains and bind certificates
   - `Microsoft.Resources/subscriptions/resourceGroups/read` — to verify the resource group
 
-  The built-in **Website Contributor** role covers all of the above.
+  Using built-in roles, assign the service principal **Website Contributor + Web Plan Contributor** on the resource group. Website Contributor alone is not enough — it lacks `Microsoft.Web/serverfarms/Write`, so the certificate upload fails:
+
+  ```
+  az role assignment create --assignee <CLIENT_ID> --role "Web Plan Contributor" \
+    --scope /subscriptions/<SUB_ID>/resourceGroups/<RESOURCE_GROUP>
+  ```
 - **DNS** — if using a custom domain, a CNAME record pointing to `<webapp-name>.azurewebsites.net` must exist before binding
 
 ## Configuration
@@ -153,6 +159,8 @@ The log includes certificate details, Azure authentication status, upload result
 | `Resource group not found` | The resource group name is wrong or the service principal lacks read access to it. |
 | `Web app not found` | The Web App name or resource group is incorrect. The script lists available Web Apps to help diagnose. |
 | `Certificate upload failed` | Invalid PFX password, corrupted PFX file, or the service principal lacks certificate write permissions. The Azure CLI's own error text is captured in the log under `Azure CLI Error:`. |
+| `LinkedAuthorizationFailed` on upload | The service principal has `Microsoft.Web/certificates/write` but lacks `Microsoft.Web/serverfarms/write` on the App Service Plan the certificate is linked to. Add **Web Plan Contributor** on the resource group (see Prerequisites). |
+| `UserWarning: You are using cryptography on a 32-bit Python...` | Harmless Azure CLI stderr noise from the 32-bit CLI build; it is not the cause of a failure. Read past it to the actual `ERROR:` line. |
 | `Failed to add custom domain` | DNS is not configured correctly. Ensure a CNAME record exists pointing to `<webapp>.azurewebsites.net`. Non-fatal — the script continues to binding. |
 | `Failed to enable HTTPS-only` | The service principal lacks `Microsoft.Web/sites/Write`, or another Azure Policy is denying the site update. Fatal — the bind cannot succeed without it. |
 | `Failed to bind certificate` / `RequestDisallowedByPolicy` | Azure Policy denied the write to `Microsoft.Web/sites`. See [HTTPS-only and Azure Policy](#https-only-and-azure-policy). Otherwise: the custom domain was not successfully added, or the thumbprint could not be extracted from the upload response. |
