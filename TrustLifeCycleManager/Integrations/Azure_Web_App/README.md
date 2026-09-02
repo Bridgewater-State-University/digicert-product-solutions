@@ -107,7 +107,7 @@ For production deployments, the script includes a commented-out section for load
 
 ### Azure Web App Target
 
-The target Web App can be configured either by hardcoding values in the script or by passing them as AWR arguments from TLM:
+By default the script takes its target from the AWR arguments passed by TLM:
 
 | Source | Parameter | Description |
 |--------|-----------|-------------|
@@ -124,13 +124,15 @@ The target Web App can be configured either by hardcoding values in the script o
 >
 > Supplying the plan name produces `Web app not found`; the script then lists the Web Apps in the resource group to help you pick the right one.
 
-To use AWR arguments instead of hardcoded values, uncomment these lines:
+To hardcode the target instead (e.g. for testing without an AWR profile), uncomment the override block that follows the argument assignments:
 
 ```powershell
-$AZURE_RESOURCE_GROUP = $ARGUMENT_1
-$AZURE_WEBAPP_NAME    = $ARGUMENT_2
-$AZURE_CUSTOM_DOMAIN  = $ARGUMENT_3
+#$AZURE_RESOURCE_GROUP = "rg-webapp-cert-demo"
+#$AZURE_WEBAPP_NAME    = "webapp-cert-demo-1765793155"
+#$AZURE_CUSTOM_DOMAIN  = "azure-webapp.tlsguru.io"
 ```
+
+Order matters here: the hardcoded block runs **after** the argument assignments, so while it is uncommented it overrides whatever the AWR passed in. The log's `Azure Configuration:` section shows the values actually in effect — check there first if the script seems to ignore your AWR parameters.
 
 ### Legal Notice
 
@@ -167,6 +169,7 @@ The log includes certificate details, Azure authentication status, upload result
 | `No thumbprint available after upload` | The upload returned a response the script could not parse and no 40-character thumbprint could be recovered from it. Check the raw upload output in the log. |
 | `Could not confirm active SNI binding` | Warning only. The binding is usually still propagating; confirm in the Azure Portal if it persists. |
 | `DC1_POST_SCRIPT_DATA is not set` | The script is not being invoked by the TLM Agent, or the AWR profile is misconfigured. |
+| Script ignores the AWR parameters | The hardcoded override block below the `$ARGUMENT_n` assignments is uncommented and is overwriting them. Compare the log's `Azure Configuration:` values against your AWR request; comment the override block out. |
 
 ## Security Considerations
 

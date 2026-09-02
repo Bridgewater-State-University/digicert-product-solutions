@@ -364,13 +364,17 @@ $AZURE_CLIENT_SECRET = "<CLIENT SECRET HERE>"  # Replace with your actual secret
 # Parameter 2: Azure Web App name  (not the App Service Plan)
 # Parameter 3: Custom domain (optional)
 
-#$AZURE_RESOURCE_GROUP = $ARGUMENT_1  # e.g., "rg-webapp-cert-demo"
-#$AZURE_WEBAPP_NAME = $ARGUMENT_2     # e.g., "webapp-cert-demo-1765793155"
-#$AZURE_CUSTOM_DOMAIN = $ARGUMENT_3   # e.g., "azure-webapp.tlsguru.io" (optional)
+# Default: take the target from the AWR arguments passed by TLM
+$AZURE_RESOURCE_GROUP = $ARGUMENT_1  # e.g., "rg-webapp-cert-demo"
+$AZURE_WEBAPP_NAME = $ARGUMENT_2     # e.g., "webapp-cert-demo-1765793155"
+$AZURE_CUSTOM_DOMAIN = $ARGUMENT_3   # e.g., "azure-webapp.tlsguru.io" (optional)
 
-$AZURE_RESOURCE_GROUP = "rg-webapp-cert-demo"
-$AZURE_WEBAPP_NAME = "webapp-cert-demo-1765793155"
-$AZURE_CUSTOM_DOMAIN = "azure-webapp.tlsguru.io"
+# Optional override: hardcode the target instead (e.g. for testing).
+# These lines run AFTER the argument assignments above, so uncommenting them
+# replaces whatever the AWR passed in.
+#$AZURE_RESOURCE_GROUP = "rg-webapp-cert-demo"
+#$AZURE_WEBAPP_NAME = "webapp-cert-demo-1765793155"
+#$AZURE_CUSTOM_DOMAIN = "azure-webapp.tlsguru.io"
 
 Write-LogMessage "Azure Configuration:"
 Write-LogMessage "  Tenant ID: $AZURE_TENANT_ID"
