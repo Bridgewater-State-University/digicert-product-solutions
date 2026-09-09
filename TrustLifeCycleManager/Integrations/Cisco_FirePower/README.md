@@ -12,14 +12,13 @@ The script is triggered automatically by the TLM Agent once a certificate has be
 4. Creates the Internal Certificate object if it does not exist, or updates it in place if an object with the same name already exists
 5. Revokes the API token and exits
 
-The script is built on the DigiCert AWR CRT/KEY PowerShell template (`awr-template-crt.ps1`). Everything up to the **CUSTOM SCRIPT SECTION** is identical to the template; the FMC deployment logic lives inside that section.
+The script follows the standard DigiCert AWR post-enrollment flow: legal notice gate, payload decoding, argument extraction, and certificate inspection. The FMC deployment logic lives in the **CUSTOM SCRIPT SECTION** near the bottom of the file.
 
 ## Scripts
 
 | File | Platform | Shell |
 |------|----------|-------|
 | `admin-webrequest-post-script/Windows/cisco-firepower-awr.ps1` | Windows | PowerShell 5.1 / 7+ |
-| `admin-webrequest-post-script/Windows/awr-template-crt.ps1` | Windows | Reference template the script is derived from |
 
 ## Prerequisites
 
@@ -166,7 +165,7 @@ On first run no object exists, so the script POSTs a new Internal Certificate. O
 
 ## Logging
 
-The script produces a detailed, timestamped log identical in structure to the AWR template. Credentials and passwords are masked everywhere they appear. The log includes:
+The script produces a detailed, timestamped log. Credentials and passwords are masked everywhere they appear. The log includes:
 
 - Configuration summary
 - The raw decoded JSON payload with the password half of `args[0]` and any `password` / `passphrase` fields replaced by `********`
