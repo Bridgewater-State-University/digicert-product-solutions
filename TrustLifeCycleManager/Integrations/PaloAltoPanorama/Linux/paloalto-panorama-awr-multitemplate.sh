@@ -32,18 +32,33 @@ LEGAL_NOTICE
 
 # =============================================================================
 # DigiCert Trust Lifecycle Manager (TLM) — AWR Post-Enrollment Script
-# Palo Alto Panorama Certificate Upload
+# Palo Alto Panorama Certificate Upload — MULTI-TEMPLATE VARIANT
 #
 # Uploads a PEM certificate + private key to Palo Alto Panorama via the
 # PAN-OS XML API. Designed to run non-interactively as a TLM AWR
 # post-enrollment script. All configuration is via DC1_POST_SCRIPT_DATA
 # arguments or the variables below.
 #
+# This variant extends the single-template script: in 'template' mode,
+# Arguments 3 and 4 accept SEMICOLON-DELIMITED LISTS so the same certificate
+# can be uploaded into multiple Panorama device templates and pushed via
+# multiple template stacks in a single run. Semicolons are used as the list
+# delimiter because TLM separates AWR arguments with commas. A single name
+# (no semicolons) behaves exactly like the original script.
+#
+# Workflow with multiple templates:
+#   - The certificate name is resolved and the cert + key are uploaded once
+#     per listed template (each template has its own certificate store, so
+#     CN discovery runs independently per template).
+#   - A single commit to Panorama covers all templates.
+#   - Each listed template stack is then pushed to its devices in order.
+#
 # Supports two modes (set via MODE variable below):
 #
-#   template  - Uploads to a Panorama device template, commits, and pushes
-#               to all firewalls in the template stack. Use for GlobalProtect,
-#               SSL Decryption, LDAP, Captive Portal, IPSec, etc.
+#   template  - Uploads to one or more Panorama device templates, commits,
+#               and pushes the listed template stacks to their firewalls.
+#               Use for GlobalProtect, SSL Decryption, LDAP, Captive Portal,
+#               IPSec, etc.
 #
 #   system    - Uploads directly to Panorama itself. Use for the Panorama
 #               management UI certificate, syslog, SNMP, etc.
@@ -63,14 +78,19 @@ LEGAL_NOTICE
 #   Argument 1 : Panorama IP address or FQDN
 #   Argument 2 : Panorama credentials in the format username:password
 #                (password may contain colons)
-#   Argument 3 : Panorama Template Name  (used in 'template' mode)
-#   Argument 4 : Panorama Template Stack Name (used in 'template' mode)
+#   Argument 3 : Panorama Template Name(s)  (used in 'template' mode)
+#                Single name or semicolon-delimited list,
+#                e.g. "TPL-EMEA;TPL-APAC;TPL-AMER"
+#   Argument 4 : Panorama Template Stack Name(s) (used in 'template' mode)
+#                Single name or semicolon-delimited list,
+#                e.g. "Stack-EMEA;Stack-APAC;Stack-AMER"
 #   Argument 5 : Certificate name override (optional)
 #                If provided, the script targets this exact certificate name
-#                in Panorama and skips CN-based discovery entirely.
-#                If omitted, CN-based discovery is used. Discovery will fail
-#                with an error if multiple certificates share the same CN —
-#                in which case set this argument to resolve the ambiguity.
+#                in every template and skips CN-based discovery entirely.
+#                If omitted, CN-based discovery is used per template.
+#                Discovery will fail with an error if multiple certificates
+#                share the same CN within a template — in which case set
+#                this argument to resolve the ambiguity.
 #
 # =============================================================================
 
@@ -83,10 +103,11 @@ LEGAL_NOTICE
 LEGAL_NOTICE_ACCEPT="false"
 
 # Mode: "template" or "system"
-#   template — Upload cert to a Panorama device template, commit to Panorama,
-#              then push the template stack to all managed firewalls. Use this
-#              when the certificate is consumed by firewalls (GlobalProtect,
-#              SSL Decryption, LDAP, Captive Portal, IPSec, etc.)
+#   template — Upload cert to one or more Panorama device templates, commit
+#              to Panorama, then push the listed template stacks to their
+#              managed firewalls. Use this when the certificate is consumed
+#              by firewalls (GlobalProtect, SSL Decryption, LDAP, Captive
+#              Portal, IPSec, etc.)
 #   system   — Upload cert directly to Panorama's own certificate store and
 #              commit. No push to firewalls. Use this when the certificate is
 #              for Panorama itself (management UI, syslog, SNMP, etc.)
@@ -124,7 +145,7 @@ log_message() {
 
 # --- Start logging -----------------------------------------------------------
 log_message "=========================================="
-log_message "Panorama Certificate Upload — AWR Post-Enrollment Script"
+log_message "Panorama Certificate Upload (Multi-Template) — AWR Post-Enrollment Script"
 log_message "=========================================="
 
 # --- Legal notice gate -------------------------------------------------------
@@ -179,8 +200,8 @@ log_message "Raw args array not logged because Argument 2 contains credentials."
 
 # Split the args array into its JSON string elements. Matching whole quoted
 # strings (including \" escapes) preserves commas, colons, quotes and spaces
-# inside values — the previous comma-splitting truncated passwords containing
-# commas, and stripping all whitespace corrupted passwords containing spaces.
+# inside values — naive comma-splitting truncates passwords containing
+# commas, and stripping all whitespace corrupts passwords containing spaces.
 ARGS_LIST=()
 while IFS= read -r _ARG_ELEM; do
     _ARG_ELEM="${_ARG_ELEM#\"}"
@@ -204,18 +225,31 @@ PANORAMA_PASS=$(printf '%s' "$ARG2_CREDENTIAL" | cut -d: -f2-)
 log_message "PANORAMA_USER (Arg2, from credential): '$PANORAMA_USER'"
 log_message "PANORAMA_PASS (Arg2, from credential): ********"
 
-# Argument 3 — Panorama Template Name (template mode)
-TEMPLATE_NAME=$(printf '%s' "${ARGS_LIST[2]:-}" | tr -d '[:space:]')
-log_message "TEMPLATE_NAME (Arg3): '$TEMPLATE_NAME'"
+# Argument 3 — Panorama Template Name(s) (template mode)
+# Single name or semicolon-delimited list. Empty entries (e.g. from a
+# trailing semicolon) are dropped.
+TEMPLATE_ARG=$(printf '%s' "${ARGS_LIST[2]:-}" | tr -d '[:space:]')
+TEMPLATE_NAMES=()
+IFS=';' read -ra _RAW_TEMPLATES <<< "$TEMPLATE_ARG"
+for _T in "${_RAW_TEMPLATES[@]}"; do
+    [ -n "$_T" ] && TEMPLATE_NAMES+=("$_T")
+done
+log_message "TEMPLATE_NAMES (Arg3): ${#TEMPLATE_NAMES[@]} template(s): '${TEMPLATE_NAMES[*]:-}'"
 
-# Argument 4 — Panorama Template Stack Name (template mode)
-TEMPLATE_STACK_NAME=$(printf '%s' "${ARGS_LIST[3]:-}" | tr -d '[:space:]')
-log_message "TEMPLATE_STACK_NAME (Arg4): '$TEMPLATE_STACK_NAME'"
+# Argument 4 — Panorama Template Stack Name(s) (template mode)
+# Single name or semicolon-delimited list. Empty entries are dropped.
+STACK_ARG=$(printf '%s' "${ARGS_LIST[3]:-}" | tr -d '[:space:]')
+TEMPLATE_STACK_NAMES=()
+IFS=';' read -ra _RAW_STACKS <<< "$STACK_ARG"
+for _S in "${_RAW_STACKS[@]}"; do
+    [ -n "$_S" ] && TEMPLATE_STACK_NAMES+=("$_S")
+done
+log_message "TEMPLATE_STACK_NAMES (Arg4): ${#TEMPLATE_STACK_NAMES[@]} stack(s): '${TEMPLATE_STACK_NAMES[*]:-}'"
 
 # Argument 5 — Certificate name override (optional)
-# If set, the script targets this exact Panorama certificate entry name and
-# skips CN-based discovery. If empty, CN discovery is used with ambiguity
-# detection (see Step 2).
+# If set, the script targets this exact Panorama certificate entry name in
+# every template and skips CN-based discovery. If empty, CN discovery is
+# used per template with ambiguity detection (see Step 2).
 CERT_NAME_OVERRIDE=$(printf '%s' "${ARGS_LIST[4]:-}" | tr -d '[:space:]')
 if [ -n "$CERT_NAME_OVERRIDE" ]; then
     log_message "CERT_NAME_OVERRIDE (Arg5): '$CERT_NAME_OVERRIDE'"
@@ -237,12 +271,12 @@ if [ -z "$PANORAMA_PASS" ]; then
     exit 1
 fi
 if [ "$MODE" = "template" ]; then
-    if [ -z "$TEMPLATE_NAME" ]; then
-        log_message "ERROR: Argument 3 (Template Name) is required in template mode."
+    if [ ${#TEMPLATE_NAMES[@]} -eq 0 ]; then
+        log_message "ERROR: Argument 3 (Template Name(s)) is required in template mode."
         exit 1
     fi
-    if [ -z "$TEMPLATE_STACK_NAME" ]; then
-        log_message "ERROR: Argument 4 (Template Stack Name) is required in template mode."
+    if [ ${#TEMPLATE_STACK_NAMES[@]} -eq 0 ]; then
+        log_message "ERROR: Argument 4 (Template Stack Name(s)) is required in template mode."
         exit 1
     fi
 fi
@@ -315,7 +349,7 @@ log_message "Common Name: $COMMON_NAME"
 
 # --- Display banner (to log) -------------------------------------------------
 log_message "============================================"
-log_message "Panorama Certificate Upload"
+log_message "Panorama Certificate Upload (Multi-Template)"
 log_message "============================================"
 log_message "Mode:           $MODE"
 log_message "Common Name:    $COMMON_NAME"
@@ -326,11 +360,17 @@ log_message "User:           $PANORAMA_USER"
 if [ -n "$CERT_NAME_OVERRIDE" ]; then
     log_message "Cert Name:      $CERT_NAME_OVERRIDE (explicit override — discovery skipped)"
 else
-    log_message "Cert Name:      <will be determined by CN discovery>"
+    log_message "Cert Name:      <will be determined by CN discovery per template>"
 fi
 if [ "$MODE" = "template" ]; then
-    log_message "Template:       $TEMPLATE_NAME"
-    log_message "Template Stack: $TEMPLATE_STACK_NAME"
+    log_message "Templates (${#TEMPLATE_NAMES[@]}):"
+    for _T in "${TEMPLATE_NAMES[@]}"; do
+        log_message "  - $_T"
+    done
+    log_message "Template Stacks (${#TEMPLATE_STACK_NAMES[@]}):"
+    for _S in "${TEMPLATE_STACK_NAMES[@]}"; do
+        log_message "  - $_S"
+    done
 fi
 log_message "============================================"
 
@@ -371,9 +411,151 @@ wait_for_job() {
     done
 }
 
+# --- Helper: resolve cert name + upload cert & key to one target --------------
+# $1 = template name, or empty string for system mode (Panorama's own store).
+# Steps 2–4 run once per target because each template has its own certificate
+# store — CN discovery can resolve to a different entry name per template.
+# On success the resolved name is appended to RESOLVED_SUMMARY for the final
+# summary block. Any failure exits the script (an aborted run leaves nothing
+# committed, since the commit only happens after all uploads succeed).
+RESOLVED_SUMMARY=()
+process_target() {
+    local TARGET_TEMPLATE="$1"
+    local TARGET_LABEL
+    if [ -n "$TARGET_TEMPLATE" ]; then
+        TARGET_LABEL="template '$TARGET_TEMPLATE'"
+    else
+        TARGET_LABEL="Panorama (system)"
+    fi
+
+    # --- Step 2: Resolve certificate name -------------------------------------
+    log_message "[2] Resolving target certificate name for ${TARGET_LABEL}..."
+
+    local CERT_XPATH
+    if [ -n "$TARGET_TEMPLATE" ]; then
+        CERT_XPATH="/config/devices/entry[@name='localhost.localdomain']/template/entry[@name='${TARGET_TEMPLATE}']/config/shared/certificate"
+    else
+        CERT_XPATH="/config/shared/certificate"
+    fi
+
+    local CERT_NAME
+    if [ -n "$CERT_NAME_OVERRIDE" ]; then
+        # --- Explicit override: trust the provided name, no discovery needed --
+        CERT_NAME="$CERT_NAME_OVERRIDE"
+        log_message "  Using explicit certificate name override: '$CERT_NAME'"
+        log_message "  CN-based discovery skipped."
+    else
+        # --- CN-based discovery ------------------------------------------------
+        log_message "  No override provided — performing CN-based discovery for CN='$COMMON_NAME'..."
+
+        local CERT_XML CERT_XML_FLAT
+        CERT_XML=$(curl -sk -g \
+            "https://${PANORAMA_IP}/api/?type=config&action=get&xpath=${CERT_XPATH}&key=${API_KEY}")
+
+        CERT_XML_FLAT=$(echo "$CERT_XML" | tr -d '\n' | tr -s ' ')
+
+        # Collect all certificate entry names that match the CN
+        local MATCHING_NAMES=()
+        local ENTRY_NAME
+        while IFS= read -r ENTRY_NAME; do
+            MATCHING_NAMES+=("$ENTRY_NAME")
+        done < <(echo "$CERT_XML_FLAT" \
+            | grep -oP '<entry name="[^"]*"[^>]*>.*?</entry>' \
+            | grep "<common-name>${COMMON_NAME}</common-name>" \
+            | grep -oP '(?<=<entry name=")[^"]*')
+
+        local MATCH_COUNT=${#MATCHING_NAMES[@]}
+
+        if [ "$MATCH_COUNT" -eq 0 ]; then
+            log_message "  No existing certificate found with CN='$COMMON_NAME' in ${TARGET_LABEL}."
+            log_message "  A new certificate entry will be created."
+            CERT_NAME=$(echo "$COMMON_NAME" | tr '.' '-')
+            log_message "  Derived certificate name: '$CERT_NAME'"
+
+        elif [ "$MATCH_COUNT" -eq 1 ]; then
+            CERT_NAME="${MATCHING_NAMES[0]}"
+            log_message "  Found exactly one certificate with CN='$COMMON_NAME': '$CERT_NAME'"
+            log_message "  Will update in place (bindings will be preserved)."
+
+        else
+            # Multiple certificates share the same CN — fail loudly
+            log_message "ERROR: CN-based discovery found $MATCH_COUNT certificates sharing CN='$COMMON_NAME' in ${TARGET_LABEL}."
+            log_message "  Panorama cannot reliably determine which entry to update."
+            log_message "  Conflicting certificate names:"
+            local NAME
+            for NAME in "${MATCHING_NAMES[@]}"; do
+                log_message "    - $NAME"
+            done
+            log_message "  ACTION REQUIRED: Set Argument 5 (certificate name override) to the exact"
+            log_message "  Panorama certificate entry name you want to update, then re-run."
+            exit 1
+        fi
+    fi
+
+    # --- Step 3: Upload certificate (PEM) --------------------------------------
+    log_message "[3] Uploading certificate '$CERT_NAME' to ${TARGET_LABEL}..."
+
+    # Text fields use --form-string so values are sent literally — with plain
+    # -F, curl treats a leading '@' or '<' in the value as a file reference.
+    local UPLOAD_CERT_ARGS=(
+        -F "file=@${CRT_FILE_PATH}"
+        --form-string "type=import"
+        --form-string "category=certificate"
+        --form-string "certificate-name=${CERT_NAME}"
+        --form-string "format=pem"
+        --form-string "key=${API_KEY}"
+    )
+
+    if [ -n "$TARGET_TEMPLATE" ]; then
+        UPLOAD_CERT_ARGS+=(--form-string "target-tpl=${TARGET_TEMPLATE}")
+    fi
+
+    local UPLOAD_CERT_RESPONSE
+    UPLOAD_CERT_RESPONSE=$(curl -sk -X POST "https://${PANORAMA_IP}/api/" "${UPLOAD_CERT_ARGS[@]}")
+
+    if echo "$UPLOAD_CERT_RESPONSE" | grep -q 'status="success"'; then
+        log_message "  Certificate uploaded successfully."
+    else
+        log_message "ERROR: Certificate upload to ${TARGET_LABEL} failed:"
+        log_message "$UPLOAD_CERT_RESPONSE"
+        exit 1
+    fi
+
+    # --- Step 4: Upload private key (PEM) --------------------------------------
+    log_message "[4] Uploading private key for '$CERT_NAME' to ${TARGET_LABEL}..."
+
+    local UPLOAD_KEY_ARGS=(
+        -F "file=@${KEY_FILE_PATH}"
+        --form-string "type=import"
+        --form-string "category=private-key"
+        --form-string "certificate-name=${CERT_NAME}"
+        --form-string "format=pem"
+        --form-string "passphrase=${KEY_PASSPHRASE}"
+        --form-string "key=${API_KEY}"
+    )
+
+    if [ -n "$TARGET_TEMPLATE" ]; then
+        UPLOAD_KEY_ARGS+=(--form-string "target-tpl=${TARGET_TEMPLATE}")
+    fi
+
+    local UPLOAD_KEY_RESPONSE
+    UPLOAD_KEY_RESPONSE=$(curl -sk -X POST "https://${PANORAMA_IP}/api/" "${UPLOAD_KEY_ARGS[@]}")
+
+    if echo "$UPLOAD_KEY_RESPONSE" | grep -q 'status="success"'; then
+        log_message "  Private key uploaded successfully."
+    else
+        log_message "ERROR: Private key upload to ${TARGET_LABEL} failed:"
+        log_message "$UPLOAD_KEY_RESPONSE"
+        exit 1
+    fi
+
+    RESOLVED_SUMMARY+=("${TARGET_LABEL}: '${CERT_NAME}'")
+}
+
 # --- Step 1: Authenticate to Panorama (get API key) --------------------------
 # Credentials go in the POST body, not the query string, so the password
-# doesn't leak into Panorama's web access logs.
+# doesn't leak into Panorama's web access logs. --data-urlencode percent-
+# encodes the values, so special characters in the password are safe.
 log_message "[1] Authenticating to Panorama ($PANORAMA_IP)..."
 API_KEY_RESPONSE=$(curl -sk \
     --request POST \
@@ -391,121 +573,21 @@ if [ -z "$API_KEY" ]; then
 fi
 log_message "  Authenticated successfully."
 
-# --- Step 2: Resolve certificate name ----------------------------------------
-log_message "[2] Resolving target certificate name..."
-
+# --- Steps 2–4: Resolve + upload, once per target ----------------------------
 if [ "$MODE" = "template" ]; then
-    CERT_XPATH="/config/devices/entry[@name='localhost.localdomain']/template/entry[@name='${TEMPLATE_NAME}']/config/shared/certificate"
+    TEMPLATE_INDEX=0
+    for TEMPLATE_NAME in "${TEMPLATE_NAMES[@]}"; do
+        TEMPLATE_INDEX=$((TEMPLATE_INDEX + 1))
+        log_message "------------------------------------------"
+        log_message "Template ${TEMPLATE_INDEX}/${#TEMPLATE_NAMES[@]}: '$TEMPLATE_NAME'"
+        log_message "------------------------------------------"
+        process_target "$TEMPLATE_NAME"
+    done
 else
-    CERT_XPATH="/config/shared/certificate"
+    process_target ""
 fi
 
-if [ -n "$CERT_NAME_OVERRIDE" ]; then
-    # --- Explicit override: trust the provided name, no discovery needed -----
-    CERT_NAME="$CERT_NAME_OVERRIDE"
-    log_message "  Using explicit certificate name override: '$CERT_NAME'"
-    log_message "  CN-based discovery skipped."
-else
-    # --- CN-based discovery --------------------------------------------------
-    log_message "  No override provided — performing CN-based discovery for CN='$COMMON_NAME'..."
-
-    CERT_XML=$(curl -sk -g \
-        "https://${PANORAMA_IP}/api/?type=config&action=get&xpath=${CERT_XPATH}&key=${API_KEY}")
-
-    CERT_XML_FLAT=$(echo "$CERT_XML" | tr -d '\n' | tr -s ' ')
-
-    # Collect all certificate entry names that match the CN
-    MATCHING_NAMES=()
-    while IFS= read -r ENTRY_NAME; do
-        MATCHING_NAMES+=("$ENTRY_NAME")
-    done < <(echo "$CERT_XML_FLAT" \
-        | grep -oP '<entry name="[^"]*"[^>]*>.*?</entry>' \
-        | grep "<common-name>${COMMON_NAME}</common-name>" \
-        | grep -oP '(?<=<entry name=")[^"]*')
-
-    MATCH_COUNT=${#MATCHING_NAMES[@]}
-
-    if [ "$MATCH_COUNT" -eq 0 ]; then
-        log_message "  No existing certificate found with CN='$COMMON_NAME'."
-        log_message "  A new certificate entry will be created."
-        CERT_NAME=$(echo "$COMMON_NAME" | tr '.' '-')
-        log_message "  Derived certificate name: '$CERT_NAME'"
-
-    elif [ "$MATCH_COUNT" -eq 1 ]; then
-        CERT_NAME="${MATCHING_NAMES[0]}"
-        log_message "  Found exactly one certificate with CN='$COMMON_NAME': '$CERT_NAME'"
-        log_message "  Will update in place (bindings will be preserved)."
-
-    else
-        # Multiple certificates share the same CN — fail loudly
-        log_message "ERROR: CN-based discovery found $MATCH_COUNT certificates sharing CN='$COMMON_NAME'."
-        log_message "  Panorama cannot reliably determine which entry to update."
-        log_message "  Conflicting certificate names:"
-        for NAME in "${MATCHING_NAMES[@]}"; do
-            log_message "    - $NAME"
-        done
-        log_message "  ACTION REQUIRED: Set Argument 5 (certificate name override) to the exact"
-        log_message "  Panorama certificate entry name you want to update, then re-run."
-        exit 1
-    fi
-fi
-
-# --- Step 3: Upload certificate (PEM) ----------------------------------------
-log_message "[3] Uploading certificate '$CERT_NAME'..."
-
-# Text fields use --form-string so values are sent literally — with plain -F,
-# curl treats a leading '@' or '<' in the value as a file reference.
-UPLOAD_CERT_ARGS=(
-    -F "file=@${CRT_FILE_PATH}"
-    --form-string "type=import"
-    --form-string "category=certificate"
-    --form-string "certificate-name=${CERT_NAME}"
-    --form-string "format=pem"
-    --form-string "key=${API_KEY}"
-)
-
-if [ "$MODE" = "template" ]; then
-    UPLOAD_CERT_ARGS+=(--form-string "target-tpl=${TEMPLATE_NAME}")
-fi
-
-UPLOAD_CERT_RESPONSE=$(curl -sk -X POST "https://${PANORAMA_IP}/api/" "${UPLOAD_CERT_ARGS[@]}")
-
-if echo "$UPLOAD_CERT_RESPONSE" | grep -q 'status="success"'; then
-    log_message "  Certificate uploaded successfully."
-else
-    log_message "ERROR: Certificate upload failed:"
-    log_message "$UPLOAD_CERT_RESPONSE"
-    exit 1
-fi
-
-# --- Step 4: Upload private key (PEM) ----------------------------------------
-log_message "[4] Uploading private key for '$CERT_NAME'..."
-
-UPLOAD_KEY_ARGS=(
-    -F "file=@${KEY_FILE_PATH}"
-    --form-string "type=import"
-    --form-string "category=private-key"
-    --form-string "certificate-name=${CERT_NAME}"
-    --form-string "format=pem"
-    --form-string "passphrase=${KEY_PASSPHRASE}"
-    --form-string "key=${API_KEY}"
-)
-
-if [ "$MODE" = "template" ]; then
-    UPLOAD_KEY_ARGS+=(--form-string "target-tpl=${TEMPLATE_NAME}")
-fi
-
-UPLOAD_KEY_RESPONSE=$(curl -sk -X POST "https://${PANORAMA_IP}/api/" "${UPLOAD_KEY_ARGS[@]}")
-
-if echo "$UPLOAD_KEY_RESPONSE" | grep -q 'status="success"'; then
-    log_message "  Private key uploaded successfully."
-else
-    log_message "ERROR: Private key upload failed:"
-    log_message "$UPLOAD_KEY_RESPONSE"
-    exit 1
-fi
-
-# --- Step 5: Commit to Panorama ----------------------------------------------
+# --- Step 5: Commit to Panorama (single commit covers all templates) ---------
 log_message "[5] Committing to Panorama..."
 COMMIT_RESPONSE=$(curl -sk -g \
     "https://${PANORAMA_IP}/api/?type=commit&cmd=<commit></commit>&key=${API_KEY}")
@@ -521,20 +603,27 @@ else
 fi
 
 # --- Step 6: Push to devices (template mode only) ----------------------------
+# Each listed template stack is pushed sequentially. A stack that fails to
+# create a push job logs a warning and the remaining stacks are still pushed;
+# a push job that runs and FAILS aborts the script (via wait_for_job).
 if [ "$MODE" = "template" ]; then
-    log_message "[6] Pushing template stack '$TEMPLATE_STACK_NAME' to all devices..."
-    PUSH_CMD="<commit-all><template-stack><name>${TEMPLATE_STACK_NAME}</name></template-stack></commit-all>"
-    PUSH_RESPONSE=$(curl -sk "https://${PANORAMA_IP}/api/?type=commit&action=all&key=${API_KEY}" --data-urlencode "cmd=${PUSH_CMD}")
+    STACK_INDEX=0
+    for TEMPLATE_STACK_NAME in "${TEMPLATE_STACK_NAMES[@]}"; do
+        STACK_INDEX=$((STACK_INDEX + 1))
+        log_message "[6] Pushing template stack ${STACK_INDEX}/${#TEMPLATE_STACK_NAMES[@]} '$TEMPLATE_STACK_NAME' to all devices..."
+        PUSH_CMD="<commit-all><template-stack><name>${TEMPLATE_STACK_NAME}</name></template-stack></commit-all>"
+        PUSH_RESPONSE=$(curl -sk "https://${PANORAMA_IP}/api/?type=commit&action=all&key=${API_KEY}" --data-urlencode "cmd=${PUSH_CMD}")
 
-    PUSH_JOB_ID=$(echo "$PUSH_RESPONSE" | grep -oP '(?<=<job>)[^<]*') || true
+        PUSH_JOB_ID=$(echo "$PUSH_RESPONSE" | grep -oP '(?<=<job>)[^<]*') || true
 
-    if [ -z "$PUSH_JOB_ID" ]; then
-        log_message "  WARNING: No push job created. Response:"
-        log_message "  $PUSH_RESPONSE"
-    else
-        log_message "  Push job ID: $PUSH_JOB_ID"
-        wait_for_job "$PUSH_JOB_ID" "Push to devices"
-    fi
+        if [ -z "$PUSH_JOB_ID" ]; then
+            log_message "  WARNING: No push job created for stack '$TEMPLATE_STACK_NAME'. Response:"
+            log_message "  $PUSH_RESPONSE"
+        else
+            log_message "  Push job ID: $PUSH_JOB_ID"
+            wait_for_job "$PUSH_JOB_ID" "Push to devices ($TEMPLATE_STACK_NAME)"
+        fi
+    done
 else
     log_message "[6] Skipping push (system mode — cert is on Panorama itself)."
 fi
@@ -543,14 +632,20 @@ fi
 log_message "=========================================="
 log_message "COMPLETED SUCCESSFULLY"
 log_message "=========================================="
-log_message "Certificate '$CERT_NAME' (CN=$COMMON_NAME)"
+log_message "Certificate (CN=$COMMON_NAME)"
 log_message "  Mode: $MODE"
 if [ "$MODE" = "template" ]; then
-    log_message "  Uploaded to template: $TEMPLATE_NAME"
+    log_message "  Uploaded to ${#TEMPLATE_NAMES[@]} template(s):"
+    for ENTRY in "${RESOLVED_SUMMARY[@]}"; do
+        log_message "    - $ENTRY"
+    done
     log_message "  Committed to Panorama"
-    log_message "  Pushed to devices via stack: $TEMPLATE_STACK_NAME"
+    log_message "  Pushed to devices via ${#TEMPLATE_STACK_NAMES[@]} stack(s):"
+    for _S in "${TEMPLATE_STACK_NAMES[@]}"; do
+        log_message "    - $_S"
+    done
 else
-    log_message "  Uploaded to Panorama (system)"
+    log_message "  Uploaded to Panorama (system): ${RESOLVED_SUMMARY[0]:-}"
     log_message "  Committed to Panorama"
     log_message "  NOTE: To use this cert for the management UI, create an"
     log_message "    SSL/TLS Service Profile referencing this cert, then assign"

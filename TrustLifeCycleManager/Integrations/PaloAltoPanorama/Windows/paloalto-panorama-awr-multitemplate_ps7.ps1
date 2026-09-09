@@ -1,4 +1,4 @@
-﻿<#
+<#
 Legal Notice (version January 1, 2026)
 Copyright (c) 2026 DigiCert. All rights reserved.
 DigiCert and its logo are registered trademarks of DigiCert, Inc.
@@ -30,18 +30,33 @@ successor regulations. The contractor/manufacturer is DIGICERT, INC.
 
 # =============================================================================
 # DigiCert Trust Lifecycle Manager (TLM) -- AWR Post-Enrollment Script
-# Palo Alto Panorama Certificate Upload
+# Palo Alto Panorama Certificate Upload -- MULTI-TEMPLATE VARIANT
 #
 # Uploads a PEM certificate + private key to Palo Alto Panorama via the
 # PAN-OS XML API. Designed to run non-interactively as a TLM AWR
 # post-enrollment script. All configuration is via DC1_POST_SCRIPT_DATA
 # arguments or the variables below.
 #
+# This variant extends the single-template script: in 'template' mode,
+# Arguments 3 and 4 accept SEMICOLON-DELIMITED LISTS so the same certificate
+# can be uploaded into multiple Panorama device templates and pushed via
+# multiple template stacks in a single run. Semicolons are used as the list
+# delimiter because TLM separates AWR arguments with commas. A single name
+# (no semicolons) behaves exactly like the original script.
+#
+# Workflow with multiple templates:
+#   - The certificate name is resolved and the cert + key are uploaded once
+#     per listed template (each template has its own certificate store, so
+#     CN discovery runs independently per template).
+#   - A single commit to Panorama covers all templates.
+#   - Each listed template stack is then pushed to its devices in order.
+#
 # Supports two modes (set via MODE variable below):
 #
-#   template  - Uploads to a Panorama device template, commits, and pushes
-#               to all firewalls in the template stack. Use for GlobalProtect,
-#               SSL Decryption, LDAP, Captive Portal, IPSec, etc.
+#   template  - Uploads to one or more Panorama device templates, commits,
+#               and pushes the listed template stacks to their firewalls.
+#               Use for GlobalProtect, SSL Decryption, LDAP, Captive Portal,
+#               IPSec, etc.
 #
 #   system    - Uploads directly to Panorama itself. Use for the Panorama
 #               management UI certificate, syslog, SNMP, etc.
@@ -57,23 +72,26 @@ successor regulations. The contractor/manufacturer is DIGICERT, INC.
 #            extraction, but upload may fail. Configure TLM to deliver
 #            the leaf certificate separately.
 #
-# Requires: Windows PowerShell 5.1 or later. (Earlier versions of this script
-#           required PowerShell 7 for -Form and -SkipCertificateCheck on
-#           Invoke-WebRequest; this version implements both manually so it
-#           runs under the default powershell.exe shipped with Windows.)
+# Requires: PowerShell 7.0 or later (for -Form and -SkipCertificateCheck
+#           support on Invoke-WebRequest).
 #
 # DC1_POST_SCRIPT_DATA Arguments (configured in TLM AWR):
 #   Argument 1 : Panorama IP address or FQDN
 #   Argument 2 : Panorama credentials in the format username:password
 #                (password may contain colons)
-#   Argument 3 : Panorama Template Name  (used in 'template' mode)
-#   Argument 4 : Panorama Template Stack Name (used in 'template' mode)
+#   Argument 3 : Panorama Template Name(s)  (used in 'template' mode)
+#                Single name or semicolon-delimited list,
+#                e.g. "TPL-EMEA;TPL-APAC;TPL-AMER"
+#   Argument 4 : Panorama Template Stack Name(s) (used in 'template' mode)
+#                Single name or semicolon-delimited list,
+#                e.g. "Stack-EMEA;Stack-APAC;Stack-AMER"
 #   Argument 5 : Certificate name override (optional)
 #                If provided, the script targets this exact certificate name
-#                in Panorama and skips CN-based discovery entirely.
-#                If omitted, CN-based discovery is used. Discovery will fail
-#                with an error if multiple certificates share the same CN --
-#                in which case set this argument to resolve the ambiguity.
+#                in every template and skips CN-based discovery entirely.
+#                If omitted, CN-based discovery is used per template.
+#                Discovery will fail with an error if multiple certificates
+#                share the same CN within a template -- in which case set
+#                this argument to resolve the ambiguity.
 #
 # =============================================================================
 
@@ -86,10 +104,11 @@ successor regulations. The contractor/manufacturer is DIGICERT, INC.
 $LegalNoticeAccept = $false
 
 # Mode: 'template' or 'system'
-#   template -- Upload cert to a Panorama device template, commit to Panorama,
-#              then push the template stack to all managed firewalls. Use this
-#              when the certificate is consumed by firewalls (GlobalProtect,
-#              SSL Decryption, LDAP, Captive Portal, IPSec, etc.)
+#   template -- Upload cert to one or more Panorama device templates, commit
+#              to Panorama, then push the listed template stacks to their
+#              managed firewalls. Use this when the certificate is consumed
+#              by firewalls (GlobalProtect, SSL Decryption, LDAP, Captive
+#              Portal, IPSec, etc.)
 #   system   -- Upload cert directly to Panorama's own certificate store and
 #              commit. No push to firewalls. Use this when the certificate is
 #              for Panorama itself (management UI, syslog, SNMP, etc.)
@@ -116,16 +135,6 @@ $Logfile = 'C:\DigiCert\panorama.log'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# --- TLS / certificate validation setup (PS 5.1) -----------------------------
-# PowerShell 5.1's Invoke-WebRequest has no -SkipCertificateCheck switch, so we
-# disable server-cert validation process-wide via the .NET callback. This
-# script runs in a short-lived process invoked by the TLM agent; the callback
-# disappears when the process exits. Also force TLS 1.2 since PS 5.1 defaults
-# to TLS 1.0/1.1 on older Windows builds and Panorama refuses those.
-[Net.ServicePointManager]::SecurityProtocol = `
-    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-
 # --- Ensure log directory exists ---------------------------------------------
 $LogDir = Split-Path -Parent $Logfile
 if (-not (Test-Path $LogDir)) {
@@ -150,87 +159,9 @@ function ConvertTo-UrlEncoded {
     return [uri]::EscapeDataString($Value)
 }
 
-# --- Panorama API URI builder ------------------------------------------------
-# Constructs the Panorama API URL from separate pieces so that no complete
-# scheme + host + path literal appears in the script source. This is a
-# defensive measure against URL-rewriting content scanners (Proofpoint URL
-# Defense and similar) that mangle URL-shaped strings during file transit.
-# The full URL is only assembled in memory at runtime.
-function New-PanoramaApiUri {
-    param(
-        [Parameter(Mandatory=$true)] [string]$ApiHost,
-        $Query = $null
-    )
-    $sep  = ':/' + '/'
-    $base = 'https' + $sep + $ApiHost + '/api/'
-    if ($null -eq $Query -or $Query.Count -eq 0) { return $base }
-    $pairs = foreach ($k in $Query.Keys) { "$k=$($Query[$k])" }
-    return $base + '?' + ($pairs -join '&')
-}
-
-# --- Multipart/form-data upload helper (PS 5.1) ------------------------------
-# Replaces the PS 7 -Form switch on Invoke-WebRequest. Builds the request body
-# as a byte array so binary file contents pass through untouched. All text
-# parts use UTF-8 encoding and CRLF line endings as required by RFC 7578.
-function Invoke-MultipartUpload {
-    param(
-        [Parameter(Mandatory=$true)] [string]   $Uri,
-        [Parameter(Mandatory=$true)] [hashtable]$Fields,
-        [Parameter(Mandatory=$true)] [string]   $FilePath,
-        [string]$FileFieldName = 'file'
-    )
-
-    $boundary = [System.Guid]::NewGuid().ToString()
-    $LF       = "`r`n"
-    $enc      = [System.Text.Encoding]::UTF8
-    $ms       = New-Object System.IO.MemoryStream
-
-    try {
-        # --- Plain text fields ---
-        foreach ($key in $Fields.Keys) {
-            $value = [string]$Fields[$key]
-            $part  = "--$boundary$LF" +
-                     "Content-Disposition: form-data; name=`"$key`"$LF$LF" +
-                     "$value$LF"
-            $bytes = $enc.GetBytes($part)
-            $ms.Write($bytes, 0, $bytes.Length)
-        }
-
-        # --- File field ---
-        $fileName   = [System.IO.Path]::GetFileName($FilePath)
-        $fileHeader = "--$boundary$LF" +
-                      "Content-Disposition: form-data; name=`"$FileFieldName`"; filename=`"$fileName`"$LF" +
-                      "Content-Type: application/octet-stream$LF$LF"
-        $hdrBytes = $enc.GetBytes($fileHeader)
-        $ms.Write($hdrBytes, 0, $hdrBytes.Length)
-
-        $fileBytes = [System.IO.File]::ReadAllBytes($FilePath)
-        $ms.Write($fileBytes, 0, $fileBytes.Length)
-
-        $trailBytes = $enc.GetBytes($LF)
-        $ms.Write($trailBytes, 0, $trailBytes.Length)
-
-        # --- Closing boundary ---
-        $closeBytes = $enc.GetBytes("--$boundary--$LF")
-        $ms.Write($closeBytes, 0, $closeBytes.Length)
-
-        $bodyBytes = $ms.ToArray()
-    }
-    finally {
-        $ms.Dispose()
-    }
-
-    return Invoke-WebRequest `
-        -Uri $Uri `
-        -Method Post `
-        -ContentType "multipart/form-data; boundary=$boundary" `
-        -Body $bodyBytes `
-        -UseBasicParsing
-}
-
 # --- Start logging -----------------------------------------------------------
 Write-Log '=========================================='
-Write-Log 'Panorama Certificate Upload -- AWR Post-Enrollment Script'
+Write-Log 'Panorama Certificate Upload (Multi-Template) -- AWR Post-Enrollment Script'
 Write-Log '=========================================='
 
 # --- Legal notice gate -------------------------------------------------------
@@ -299,13 +230,18 @@ $PanoramaPass = $Arg2Credential.Substring($ColonIndex + 1)
 Write-Log "PANORAMA_USER (Arg2, from credential): '$PanoramaUser'"
 Write-Log 'PANORAMA_PASS (Arg2, from credential): ********'
 
-# Argument 3 -- Panorama Template Name (template mode)
-$TemplateName = if ($ArgsArray.Count -ge 3) { $ArgsArray[2].Trim() } else { '' }
-Write-Log "TEMPLATE_NAME (Arg3): '$TemplateName'"
+# Argument 3 -- Panorama Template Name(s) (template mode)
+# Single name or semicolon-delimited list. Empty entries (e.g. from a
+# trailing semicolon) are dropped.
+$TemplateArg   = if ($ArgsArray.Count -ge 3) { $ArgsArray[2].Trim() } else { '' }
+$TemplateNames = @($TemplateArg -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+Write-Log "TEMPLATE_NAMES (Arg3): $($TemplateNames.Count) template(s): '$($TemplateNames -join "', '")'"
 
-# Argument 4 -- Panorama Template Stack Name (template mode)
-$TemplateStackName = if ($ArgsArray.Count -ge 4) { $ArgsArray[3].Trim() } else { '' }
-Write-Log "TEMPLATE_STACK_NAME (Arg4): '$TemplateStackName'"
+# Argument 4 -- Panorama Template Stack Name(s) (template mode)
+# Single name or semicolon-delimited list. Empty entries are dropped.
+$StackArg           = if ($ArgsArray.Count -ge 4) { $ArgsArray[3].Trim() } else { '' }
+$TemplateStackNames = @($StackArg -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+Write-Log "TEMPLATE_STACK_NAMES (Arg4): $($TemplateStackNames.Count) stack(s): '$($TemplateStackNames -join "', '")'"
 
 # Argument 5 -- Certificate name override (optional)
 $CertNameOverride = if ($ArgsArray.Count -ge 5) { $ArgsArray[4].Trim() } else { '' }
@@ -329,12 +265,12 @@ if ([string]::IsNullOrEmpty($PanoramaPass)) {
     exit 1
 }
 if ($Mode -eq 'template') {
-    if ([string]::IsNullOrEmpty($TemplateName)) {
-        Write-Log 'ERROR: Argument 3 (Template Name) is required in template mode.'
+    if ($TemplateNames.Count -eq 0) {
+        Write-Log 'ERROR: Argument 3 (Template Name(s)) is required in template mode.'
         exit 1
     }
-    if ([string]::IsNullOrEmpty($TemplateStackName)) {
-        Write-Log 'ERROR: Argument 4 (Template Stack Name) is required in template mode.'
+    if ($TemplateStackNames.Count -eq 0) {
+        Write-Log 'ERROR: Argument 4 (Template Stack Name(s)) is required in template mode.'
         exit 1
     }
 }
@@ -415,7 +351,7 @@ Write-Log "Common Name: $CommonName"
 
 # --- Display banner (to log) -------------------------------------------------
 Write-Log '============================================'
-Write-Log 'Panorama Certificate Upload'
+Write-Log 'Panorama Certificate Upload (Multi-Template)'
 Write-Log '============================================'
 Write-Log "Mode:           $Mode"
 Write-Log "Common Name:    $CommonName"
@@ -426,11 +362,17 @@ Write-Log "User:           $PanoramaUser"
 if (-not [string]::IsNullOrEmpty($CertNameOverride)) {
     Write-Log "Cert Name:      $CertNameOverride (explicit override -- discovery skipped)"
 } else {
-    Write-Log 'Cert Name:      <will be determined by CN discovery>'
+    Write-Log 'Cert Name:      <will be determined by CN discovery per template>'
 }
 if ($Mode -eq 'template') {
-    Write-Log "Template:       $TemplateName"
-    Write-Log "Template Stack: $TemplateStackName"
+    Write-Log "Templates ($($TemplateNames.Count)):"
+    foreach ($T in $TemplateNames) {
+        Write-Log "  - $T"
+    }
+    Write-Log "Template Stacks ($($TemplateStackNames.Count)):"
+    foreach ($S in $TemplateStackNames) {
+        Write-Log "  - $S"
+    }
 }
 Write-Log '============================================'
 
@@ -451,15 +393,10 @@ function Wait-PanoramaJob {
         $JobCmdEncoded = ConvertTo-UrlEncoded $JobCmd
         $ApiKeyEncoded = ConvertTo-UrlEncoded $ApiKey
 
-        $JobUri = New-PanoramaApiUri -ApiHost $PanoramaHost -Query ([ordered]@{
-            type = 'op'
-            cmd  = $JobCmdEncoded
-            key  = $ApiKeyEncoded
-        })
-
         $JobXml = Invoke-WebRequest `
-            -Uri $JobUri `
+            -Uri "https://$PanoramaHost/api/?type=op&cmd=$JobCmdEncoded&key=$ApiKeyEncoded" `
             -Method Get `
+            -SkipCertificateCheck `
             -UseBasicParsing
 
         $JobXmlStr = $JobXml.Content -replace "`n", ''
@@ -488,24 +425,175 @@ function Wait-PanoramaJob {
     }
 }
 
+# --- Helper: resolve cert name + upload cert & key to one target --------------
+# -TemplateName is the Panorama device template, or '' for system mode
+# (Panorama's own store). Steps 2-4 run once per target because each template
+# has its own certificate store -- CN discovery can resolve to a different
+# entry name per template. Returns the resolved certificate name; any failure
+# exits the script (nothing is committed until all uploads succeed).
+function Invoke-CertTargetUpload {
+    param(
+        [string]$TemplateName,
+        [string]$ApiKey,
+        [string]$ApiKeyEncoded
+    )
+
+    $TargetLabel = if (-not [string]::IsNullOrEmpty($TemplateName)) {
+        "template '$TemplateName'"
+    } else {
+        'Panorama (system)'
+    }
+
+    # --- Step 2: Resolve certificate name -------------------------------------
+    Write-Log "[2] Resolving target certificate name for $TargetLabel..."
+
+    $CertXpath = if (-not [string]::IsNullOrEmpty($TemplateName)) {
+        "/config/devices/entry[@name='localhost.localdomain']/template/entry[@name='$TemplateName']/config/shared/certificate"
+    } else {
+        '/config/shared/certificate'
+    }
+
+    if (-not [string]::IsNullOrEmpty($CertNameOverride)) {
+        # --- Explicit override: trust the provided name, no discovery needed -----
+        $CertName = $CertNameOverride
+        Write-Log "  Using explicit certificate name override: '$CertName'"
+        Write-Log '  CN-based discovery skipped.'
+    } else {
+        # --- CN-based discovery --------------------------------------------------
+        Write-Log "  No override provided -- performing CN-based discovery for CN='$CommonName'..."
+
+        $CertXpathEncoded = ConvertTo-UrlEncoded $CertXpath
+
+        $CertXmlResponse = Invoke-WebRequest `
+            -Uri "https://$PanoramaIP/api/?type=config&action=get&xpath=$CertXpathEncoded&key=$ApiKeyEncoded" `
+            -Method Get `
+            -SkipCertificateCheck `
+            -UseBasicParsing
+
+        $CertXmlFlat = $CertXmlResponse.Content -replace "`n", '' -replace '\s{2,}', ' '
+
+        # Collect all certificate entry names whose <common-name> matches
+        $EntryMatches  = [regex]::Matches($CertXmlFlat, '<entry name="[^"]*"[^>]*>.*?</entry>')
+        $MatchingNames = @()
+        foreach ($Entry in $EntryMatches) {
+            if ($Entry.Value -match "<common-name>$([regex]::Escape($CommonName))</common-name>") {
+                $NameMatch = [regex]::Match($Entry.Value, '<entry name="([^"]*)"')
+                if ($NameMatch.Success) {
+                    $MatchingNames += $NameMatch.Groups[1].Value
+                }
+            }
+        }
+
+        $MatchCount = $MatchingNames.Count
+
+        if ($MatchCount -eq 0) {
+            Write-Log "  No existing certificate found with CN='$CommonName' in $TargetLabel."
+            Write-Log '  A new certificate entry will be created.'
+            $CertName = $CommonName -replace '\.', '-'
+            Write-Log "  Derived certificate name: '$CertName'"
+
+        } elseif ($MatchCount -eq 1) {
+            $CertName = $MatchingNames[0]
+            Write-Log "  Found exactly one certificate with CN='$CommonName': '$CertName'"
+            Write-Log '  Will update in place (bindings will be preserved).'
+
+        } else {
+            # Multiple certificates share the same CN -- fail loudly
+            Write-Log "ERROR: CN-based discovery found $MatchCount certificates sharing CN='$CommonName' in $TargetLabel."
+            Write-Log '  Panorama cannot reliably determine which entry to update.'
+            Write-Log '  Conflicting certificate names:'
+            foreach ($Name in $MatchingNames) {
+                Write-Log "    - $Name"
+            }
+            Write-Log '  ACTION REQUIRED: Set Argument 5 (certificate name override) to the exact'
+            Write-Log '  Panorama certificate entry name you want to update, then re-run.'
+            exit 1
+        }
+    }
+
+    # --- Step 3: Upload certificate (PEM) ----------------------------------------
+    # Multipart form-data -- Invoke-WebRequest handles encoding of field values
+    # automatically when -Form is used, so no manual URL-encoding is needed here.
+    Write-Log "[3] Uploading certificate '$CertName' to $TargetLabel..."
+
+    $CertForm = @{
+        file               = Get-Item $CrtFilePath
+        type               = 'import'
+        category           = 'certificate'
+        'certificate-name' = $CertName
+        format             = 'pem'
+        key                = $ApiKey
+    }
+    if (-not [string]::IsNullOrEmpty($TemplateName)) {
+        $CertForm['target-tpl'] = $TemplateName
+    }
+
+    $UploadCertResponse = Invoke-WebRequest `
+        -Uri "https://$PanoramaIP/api/" `
+        -Method Post `
+        -Form $CertForm `
+        -SkipCertificateCheck `
+        -UseBasicParsing
+
+    if ($UploadCertResponse.Content -match 'status="success"') {
+        Write-Log '  Certificate uploaded successfully.'
+    } else {
+        Write-Log "ERROR: Certificate upload to $TargetLabel failed:"
+        Write-Log $UploadCertResponse.Content
+        exit 1
+    }
+
+    # --- Step 4: Upload private key (PEM) ----------------------------------------
+    Write-Log "[4] Uploading private key for '$CertName' to $TargetLabel..."
+
+    $KeyForm = @{
+        file               = Get-Item $KeyFilePath
+        type               = 'import'
+        category           = 'private-key'
+        'certificate-name' = $CertName
+        format             = 'pem'
+        passphrase         = $KeyPassphrase
+        key                = $ApiKey
+    }
+    if (-not [string]::IsNullOrEmpty($TemplateName)) {
+        $KeyForm['target-tpl'] = $TemplateName
+    }
+
+    $UploadKeyResponse = Invoke-WebRequest `
+        -Uri "https://$PanoramaIP/api/" `
+        -Method Post `
+        -Form $KeyForm `
+        -SkipCertificateCheck `
+        -UseBasicParsing
+
+    if ($UploadKeyResponse.Content -match 'status="success"') {
+        Write-Log '  Private key uploaded successfully.'
+    } else {
+        Write-Log "ERROR: Private key upload to $TargetLabel failed:"
+        Write-Log $UploadKeyResponse.Content
+        exit 1
+    }
+
+    return $CertName
+}
+
 # --- Step 1: Authenticate to Panorama (get API key) --------------------------
-# Credentials are sent as a manually URL-encoded form body so that special
-# characters in the password (and username) are escaped correctly under
-# PowerShell 5.1. The default hashtable-to-Body path in PS 5.1 does not
-# always percent-encode reserved characters reliably (e.g. @, !, #, $, &).
-# By building the body string ourselves with ConvertTo-UrlEncoded we
-# guarantee correct encoding regardless of password complexity.
+# Credentials go in the POST body, not the query string, so the password
+# doesn't leak into Panorama's web access logs. The body is built as a
+# manually URL-encoded string (matching the PS 5.1 variant) so special
+# characters in the username or password are always percent-encoded
+# correctly, independent of how the PowerShell version encodes hashtable
+# bodies.
 Write-Log "[1] Authenticating to Panorama ($PanoramaIP)..."
 
 $AuthBody = "type=keygen&user=$(ConvertTo-UrlEncoded $PanoramaUser)&password=$(ConvertTo-UrlEncoded $PanoramaPass)"
 
-$AuthUri = New-PanoramaApiUri -ApiHost $PanoramaIP
-
 $AuthResponse = Invoke-WebRequest `
-    -Uri $AuthUri `
+    -Uri "https://$PanoramaIP/api/" `
     -Method Post `
     -Body $AuthBody `
     -ContentType 'application/x-www-form-urlencoded' `
+    -SkipCertificateCheck `
     -UseBasicParsing
 
 $ApiKeyMatch = [regex]::Match($AuthResponse.Content, '<key>([^<]*)</key>')
@@ -518,151 +606,33 @@ $ApiKey        = $ApiKeyMatch.Groups[1].Value
 $ApiKeyEncoded = ConvertTo-UrlEncoded $ApiKey
 Write-Log '  Authenticated successfully.'
 
-# --- Step 2: Resolve certificate name ----------------------------------------
-Write-Log '[2] Resolving target certificate name...'
-
-$CertXpath = if ($Mode -eq 'template') {
-    "/config/devices/entry[@name='localhost.localdomain']/template/entry[@name='$TemplateName']/config/shared/certificate"
-} else {
-    '/config/shared/certificate'
-}
-
-if (-not [string]::IsNullOrEmpty($CertNameOverride)) {
-    # --- Explicit override: trust the provided name, no discovery needed -----
-    $CertName = $CertNameOverride
-    Write-Log "  Using explicit certificate name override: '$CertName'"
-    Write-Log '  CN-based discovery skipped.'
-} else {
-    # --- CN-based discovery --------------------------------------------------
-    Write-Log "  No override provided -- performing CN-based discovery for CN='$CommonName'..."
-
-    $CertXpathEncoded = ConvertTo-UrlEncoded $CertXpath
-
-    $DiscoveryUri = New-PanoramaApiUri -ApiHost $PanoramaIP -Query ([ordered]@{
-        type   = 'config'
-        action = 'get'
-        xpath  = $CertXpathEncoded
-        key    = $ApiKeyEncoded
-    })
-
-    $CertXmlResponse = Invoke-WebRequest `
-        -Uri $DiscoveryUri `
-        -Method Get `
-        -UseBasicParsing
-
-    $CertXmlFlat = $CertXmlResponse.Content -replace "`n", '' -replace '\s{2,}', ' '
-
-    # Collect all certificate entry names whose <common-name> matches
-    $EntryMatches  = [regex]::Matches($CertXmlFlat, '<entry name="[^"]*"[^>]*>.*?</entry>')
-    $MatchingNames = @()
-    foreach ($Entry in $EntryMatches) {
-        if ($Entry.Value -match "<common-name>$([regex]::Escape($CommonName))</common-name>") {
-            $NameMatch = [regex]::Match($Entry.Value, '<entry name="([^"]*)"')
-            if ($NameMatch.Success) {
-                $MatchingNames += $NameMatch.Groups[1].Value
-            }
-        }
-    }
-
-    $MatchCount = $MatchingNames.Count
-
-    if ($MatchCount -eq 0) {
-        Write-Log "  No existing certificate found with CN='$CommonName'."
-        Write-Log '  A new certificate entry will be created.'
-        $CertName = $CommonName -replace '\.', '-'
-        Write-Log "  Derived certificate name: '$CertName'"
-
-    } elseif ($MatchCount -eq 1) {
-        $CertName = $MatchingNames[0]
-        Write-Log "  Found exactly one certificate with CN='$CommonName': '$CertName'"
-        Write-Log '  Will update in place (bindings will be preserved).'
-
-    } else {
-        # Multiple certificates share the same CN -- fail loudly
-        Write-Log "ERROR: CN-based discovery found $MatchCount certificates sharing CN='$CommonName'."
-        Write-Log '  Panorama cannot reliably determine which entry to update.'
-        Write-Log '  Conflicting certificate names:'
-        foreach ($Name in $MatchingNames) {
-            Write-Log "    - $Name"
-        }
-        Write-Log '  ACTION REQUIRED: Set Argument 5 (certificate name override) to the exact'
-        Write-Log '  Panorama certificate entry name you want to update, then re-run.'
-        exit 1
-    }
-}
-
-# --- Step 3: Upload certificate (PEM) ----------------------------------------
-# Multipart form-data via the Invoke-MultipartUpload helper. The file is passed
-# by path so it can be streamed as binary; the other fields are plain strings.
-Write-Log "[3] Uploading certificate '$CertName'..."
-
-$CertFields = @{
-    type               = 'import'
-    category           = 'certificate'
-    'certificate-name' = $CertName
-    format             = 'pem'
-    key                = $ApiKey
-}
+# --- Steps 2-4: Resolve + upload, once per target -----------------------------
+$ResolvedSummary = @()
 if ($Mode -eq 'template') {
-    $CertFields['target-tpl'] = $TemplateName
-}
-
-$UploadCertResponse = Invoke-MultipartUpload `
-    -Uri (New-PanoramaApiUri -ApiHost $PanoramaIP) `
-    -Fields $CertFields `
-    -FilePath $CrtFilePath
-
-if ($UploadCertResponse.Content -match 'status="success"') {
-    Write-Log '  Certificate uploaded successfully.'
+    $TemplateIndex = 0
+    foreach ($TemplateName in $TemplateNames) {
+        $TemplateIndex++
+        Write-Log '------------------------------------------'
+        Write-Log "Template $TemplateIndex/$($TemplateNames.Count): '$TemplateName'"
+        Write-Log '------------------------------------------'
+        $ResolvedName     = Invoke-CertTargetUpload -TemplateName $TemplateName -ApiKey $ApiKey -ApiKeyEncoded $ApiKeyEncoded
+        $ResolvedSummary += "template '$TemplateName': '$ResolvedName'"
+    }
 } else {
-    Write-Log 'ERROR: Certificate upload failed:'
-    Write-Log $UploadCertResponse.Content
-    exit 1
+    $ResolvedName     = Invoke-CertTargetUpload -TemplateName '' -ApiKey $ApiKey -ApiKeyEncoded $ApiKeyEncoded
+    $ResolvedSummary += "Panorama (system): '$ResolvedName'"
 }
 
-# --- Step 4: Upload private key (PEM) ----------------------------------------
-Write-Log "[4] Uploading private key for '$CertName'..."
-
-$KeyFields = @{
-    type               = 'import'
-    category           = 'private-key'
-    'certificate-name' = $CertName
-    format             = 'pem'
-    passphrase         = $KeyPassphrase
-    key                = $ApiKey
-}
-if ($Mode -eq 'template') {
-    $KeyFields['target-tpl'] = $TemplateName
-}
-
-$UploadKeyResponse = Invoke-MultipartUpload `
-    -Uri (New-PanoramaApiUri -ApiHost $PanoramaIP) `
-    -Fields $KeyFields `
-    -FilePath $KeyFilePath
-
-if ($UploadKeyResponse.Content -match 'status="success"') {
-    Write-Log '  Private key uploaded successfully.'
-} else {
-    Write-Log 'ERROR: Private key upload failed:'
-    Write-Log $UploadKeyResponse.Content
-    exit 1
-}
-
-# --- Step 5: Commit to Panorama ----------------------------------------------
+# --- Step 5: Commit to Panorama (single commit covers all templates) ---------
 Write-Log '[5] Committing to Panorama...'
 
 $CommitCmd        = '<commit></commit>'
 $CommitCmdEncoded = ConvertTo-UrlEncoded $CommitCmd
 
-$CommitUri = New-PanoramaApiUri -ApiHost $PanoramaIP -Query ([ordered]@{
-    type = 'commit'
-    cmd  = $CommitCmdEncoded
-    key  = $ApiKeyEncoded
-})
-
 $CommitResponse = Invoke-WebRequest `
-    -Uri $CommitUri `
+    -Uri "https://$PanoramaIP/api/?type=commit&cmd=$CommitCmdEncoded&key=$ApiKeyEncoded" `
     -Method Get `
+    -SkipCertificateCheck `
     -UseBasicParsing
 
 $CommitJobMatch = [regex]::Match($CommitResponse.Content, '<job>([^<]*)</job>')
@@ -677,33 +647,34 @@ if (-not $CommitJobMatch.Success) {
 }
 
 # --- Step 6: Push to devices (template mode only) ----------------------------
+# Each listed template stack is pushed sequentially. A stack that fails to
+# create a push job logs a warning and the remaining stacks are still pushed;
+# a push job that runs and FAILS aborts the script (via Wait-PanoramaJob).
 if ($Mode -eq 'template') {
-    Write-Log "[6] Pushing template stack '$TemplateStackName' to all devices..."
+    $StackIndex = 0
+    foreach ($TemplateStackName in $TemplateStackNames) {
+        $StackIndex++
+        Write-Log "[6] Pushing template stack $StackIndex/$($TemplateStackNames.Count) '$TemplateStackName' to all devices..."
 
-    $PushCmd        = "<commit-all><template-stack><name>$TemplateStackName</name></template-stack></commit-all>"
-    $PushCmdEncoded = ConvertTo-UrlEncoded $PushCmd
+        $PushCmd        = "<commit-all><template-stack><name>$TemplateStackName</name></template-stack></commit-all>"
+        $PushCmdEncoded = ConvertTo-UrlEncoded $PushCmd
 
-    $PushUri = New-PanoramaApiUri -ApiHost $PanoramaIP -Query ([ordered]@{
-        type   = 'commit'
-        action = 'all'
-        key    = $ApiKeyEncoded
-        cmd    = $PushCmdEncoded
-    })
+        $PushResponse = Invoke-WebRequest `
+            -Uri "https://$PanoramaIP/api/?type=commit&action=all&key=$ApiKeyEncoded&cmd=$PushCmdEncoded" `
+            -Method Get `
+            -SkipCertificateCheck `
+            -UseBasicParsing
 
-    $PushResponse = Invoke-WebRequest `
-        -Uri $PushUri `
-        -Method Get `
-        -UseBasicParsing
-
-    $PushJobMatch = [regex]::Match($PushResponse.Content, '<job>([^<]*)</job>')
-    if (-not $PushJobMatch.Success) {
-        Write-Log '  WARNING: No push job created. Response:'
-        Write-Log "  $($PushResponse.Content)"
-    } else {
-        $PushJobId = $PushJobMatch.Groups[1].Value
-        Write-Log "  Push job ID: $PushJobId"
-        Wait-PanoramaJob -JobId $PushJobId -JobLabel 'Push to devices' -ApiKey $ApiKey `
-            -PanoramaHost $PanoramaIP -WaitSec $WaitSeconds
+        $PushJobMatch = [regex]::Match($PushResponse.Content, '<job>([^<]*)</job>')
+        if (-not $PushJobMatch.Success) {
+            Write-Log "  WARNING: No push job created for stack '$TemplateStackName'. Response:"
+            Write-Log "  $($PushResponse.Content)"
+        } else {
+            $PushJobId = $PushJobMatch.Groups[1].Value
+            Write-Log "  Push job ID: $PushJobId"
+            Wait-PanoramaJob -JobId $PushJobId -JobLabel "Push to devices ($TemplateStackName)" -ApiKey $ApiKey `
+                -PanoramaHost $PanoramaIP -WaitSec $WaitSeconds
+        }
     }
 } else {
     Write-Log '[6] Skipping push (system mode -- cert is on Panorama itself).'
@@ -713,14 +684,20 @@ if ($Mode -eq 'template') {
 Write-Log '=========================================='
 Write-Log 'COMPLETED SUCCESSFULLY'
 Write-Log '=========================================='
-Write-Log "Certificate '$CertName' (CN=$CommonName)"
+Write-Log "Certificate (CN=$CommonName)"
 Write-Log "  Mode: $Mode"
 if ($Mode -eq 'template') {
-    Write-Log "  Uploaded to template: $TemplateName"
+    Write-Log "  Uploaded to $($TemplateNames.Count) template(s):"
+    foreach ($Entry in $ResolvedSummary) {
+        Write-Log "    - $Entry"
+    }
     Write-Log '  Committed to Panorama'
-    Write-Log "  Pushed to devices via stack: $TemplateStackName"
+    Write-Log "  Pushed to devices via $($TemplateStackNames.Count) stack(s):"
+    foreach ($S in $TemplateStackNames) {
+        Write-Log "    - $S"
+    }
 } else {
-    Write-Log '  Uploaded to Panorama (system)'
+    Write-Log "  Uploaded to $($ResolvedSummary[0])"
     Write-Log '  Committed to Panorama'
     Write-Log '  NOTE: To use this cert for the management UI, create an'
     Write-Log '    SSL/TLS Service Profile referencing this cert, then assign'
