@@ -7,8 +7,8 @@
     files the agent wrote to disk, authenticates to Cisco Firepower Management Center (FMC) and
     creates or updates an Internal Certificate object via the FMC REST API.
 
-    Built on the DigiCert AWR CRT/KEY PowerShell template (awr-template-crt.ps1). The extraction,
-    logging and legal-notice flow is identical to the template; the FMC deployment lives in the
+    Follows the standard DigiCert AWR post-enrollment flow (legal-notice gate, payload decoding,
+    argument extraction, certificate inspection). The FMC deployment lives in the
     CUSTOM SCRIPT SECTION at the bottom of the file.
 .NOTES
     Legal Notice (version January 1, 2026)
