@@ -395,19 +395,20 @@ function Wait-PanoramaJob {
 
 # --- Step 1: Authenticate to Panorama (get API key) --------------------------
 # Credentials go in the POST body, not the query string, so the password
-# doesn't leak into Panorama's web access logs.
+# doesn't leak into Panorama's web access logs. The body is built as a
+# manually URL-encoded string (matching the PS 5.1 variant) so special
+# characters in the username or password are always percent-encoded
+# correctly, independent of how the PowerShell version encodes hashtable
+# bodies.
 Write-Log "[1] Authenticating to Panorama ($PanoramaIP)..."
 
-$AuthBody = @{
-    type     = 'keygen'
-    user     = $PanoramaUser
-    password = $PanoramaPass
-}
+$AuthBody = "type=keygen&user=$(ConvertTo-UrlEncoded $PanoramaUser)&password=$(ConvertTo-UrlEncoded $PanoramaPass)"
 
 $AuthResponse = Invoke-WebRequest `
     -Uri "https://$PanoramaIP/api/" `
     -Method Post `
     -Body $AuthBody `
+    -ContentType 'application/x-www-form-urlencoded' `
     -SkipCertificateCheck `
     -UseBasicParsing
 
